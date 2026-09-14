@@ -77,12 +77,17 @@ const serviceClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 // traffic; revisit if a batch routinely maxes this out.
 const QUEUE_BATCH_SIZE = 25;
 
-type SignalKind = "hazard" | "regroup" | "pitstop" | "sos";
+// `sos_response` (Task 2c) is the one SOS-raiser-only kind: a responder is on
+// the way or has reached the rider. Its body copy is decided by the job's
+// `detail` string ("is on the way.", "has reached you."), so both cases reuse
+// this single kind rather than adding a second.
+type SignalKind = "hazard" | "regroup" | "pitstop" | "sos" | "sos_response";
 const KIND_TITLE: Record<SignalKind, string> = {
   hazard: "Hazard",
   regroup: "Regroup",
   pitstop: "Pit stop",
   sos: "SOS",
+  sos_response: "Help is coming",
 };
 
 type PushJobRow = {
@@ -90,9 +95,13 @@ type PushJobRow = {
   ride_id: string;
   sender_user_id: string;
   kind: SignalKind;
+  /** sos_response only: notify this user (the raiser) alone. */
+  target_user_id: string | null;
+  /** sos_response only: body detail phrase. */
+  detail: string | null;
 };
 
-function bodyFor(kind: SignalKind, senderName: string): string {
+function bodyFor(kind: SignalKind, senderName: string, detail: string | null): string {
   switch (kind) {
     case "hazard":
       return `${senderName} flagged a hazard.`;
@@ -102,6 +111,8 @@ function bodyFor(kind: SignalKind, senderName: string): string {
       return `${senderName} called a pit stop.`;
     case "sos":
       return `${senderName} needs help. Location shared.`;
+    case "sos_response":
+      return `${senderName} ${detail ?? "is on the way."}`;
   }
 }
 
@@ -110,14 +121,19 @@ function bodyFor(kind: SignalKind, senderName: string): string {
 // version of this function, just parameterized by a job instead of the raw
 // request body.
 async function sendForJob(job: PushJobRow): Promise<{ sent: number; failed: number }> {
-  const { ride_id, sender_user_id, kind } = job;
+  const { ride_id, sender_user_id, kind, target_user_id, detail } = job;
 
+  // Recipients: a targeted job (sos_response → the raiser) goes to that one
+  // user's subscriptions; every other kind fans out to the whole ride except
+  // the sender.
+  const subQuery = serviceClient
+    .from("push_subscriptions")
+    .select("endpoint, p256dh, auth")
+    .eq("ride_id", ride_id);
   const [{ data: subs, error: subErr }, { data: sender }] = await Promise.all([
-    serviceClient
-      .from("push_subscriptions")
-      .select("endpoint, p256dh, auth")
-      .eq("ride_id", ride_id)
-      .neq("user_id", sender_user_id),
+    target_user_id
+      ? subQuery.eq("user_id", target_user_id)
+      : subQuery.neq("user_id", sender_user_id),
     serviceClient.from("profiles").select("display_name").eq("id", sender_user_id).single(),
   ]);
   if (subErr) {
@@ -129,7 +145,7 @@ async function sendForJob(job: PushJobRow): Promise<{ sent: number; failed: numb
   const isUrgent = kind === "sos";
   const payload = JSON.stringify({
     title: KIND_TITLE[kind],
-    body: bodyFor(kind, senderName),
+    body: bodyFor(kind, senderName, detail),
     // Per §10's push-dedup rules: sos gets a unique tag per event so
     // concurrent SOS cases stack instead of replacing each other; the
     // routine signals share one tag per (ride, kind) so a flurry of the same
@@ -185,7 +201,7 @@ async function processQueue(): Promise<Response> {
     .update({ status: "processing" })
     .eq("status", "pending")
     .in("id", ids)
-    .select("id, ride_id, sender_user_id, kind");
+    .select("id, ride_id, sender_user_id, kind, target_user_id, detail");
   if (claimErr) {
     console.error("[push-notify] queue claim failed", claimErr.message);
     return new Response("Queue claim failed", { status: 500 });
@@ -224,7 +240,14 @@ Deno.serve(async (req) => {
     return new Response("Push not configured", { status: 500 });
   }
 
-  let body: { ride_id?: string; sender_user_id?: string; kind?: string; mode?: string };
+  let body: {
+    ride_id?: string;
+    sender_user_id?: string;
+    kind?: string;
+    mode?: string;
+    target_user_id?: string;
+    detail?: string;
+  };
   try {
     body = await req.json();
   } catch {
@@ -255,7 +278,7 @@ Deno.serve(async (req) => {
     return await processQueue();
   }
 
-  const { ride_id, sender_user_id, kind } = body;
+  const { ride_id, sender_user_id, kind, target_user_id, detail } = body;
   if (!ride_id || !sender_user_id || !kind || !(kind in KIND_TITLE)) {
     return new Response("Missing or invalid fields", { status: 400 });
   }
@@ -276,7 +299,13 @@ Deno.serve(async (req) => {
   // contract triggerPushNotify already treats this call as.
   const { data: job, error: insertErr } = await serviceClient
     .from("push_jobs")
-    .insert({ ride_id, sender_user_id, kind })
+    .insert({
+      ride_id,
+      sender_user_id,
+      kind,
+      target_user_id: target_user_id ?? null,
+      detail: detail ?? null,
+    })
     .select("id")
     .single();
   if (insertErr) {

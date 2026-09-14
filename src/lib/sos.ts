@@ -154,6 +154,18 @@ export function stopSosTracking(handle: number | null): void {
   console.info("[sos] tracking stopped");
 }
 
+/**
+ * Fire-and-forget push to the SOS raiser only (never the whole ride) telling
+ * them help is responding/arriving. Best-effort, same contract as sendSos's
+ * triggerPushNotify: it never blocks or fails the response it is attached to.
+ * `raiserUserId` is the alert owner; the worker fans out only to that user's
+ * subscriptions (see push-notify's target_user_id path).
+ */
+function notifyRaiser(rideId: string, responderUserId: string, raiserUserId: string, detail: string): void {
+  triggerPushNotify(rideId, responderUserId, "sos_response", { targetUserId: raiserUserId, detail });
+  console.info("[sos] raiser push queued", { rideId, raiserUserId, detail });
+}
+
 /** Record that the current user is responding to an alert (unique per user). */
 export async function respondToSos(alertId: string, rideId: string, userId: string): Promise<void> {
   if (isDemoBackend) return demoRespond(alertId, rideId, userId);
@@ -164,20 +176,41 @@ export async function respondToSos(alertId: string, rideId: string, userId: stri
     throw error;
   }
   console.info("[sos] response sent", { alertId, rideId });
+  // Notify the raiser only. Load the alert's owner from the id we already have.
+  const { data: alert } = await supabase
+    .from("sos_alerts")
+    .select("user_id")
+    .eq("id", alertId)
+    .maybeSingle();
+  const raiserUserId = (alert as { user_id?: string } | null)?.user_id;
+  if (raiserUserId) notifyRaiser(rideId, userId, raiserUserId, "is on the way.");
 }
 
 /** Mark the current user's own response as having reached the rider. */
 export async function markReached(responseId: string): Promise<void> {
   if (isDemoBackend) return demoMarkReached(responseId);
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("sos_responses")
     .update({ reached_at: new Date().toISOString() })
-    .eq("id", responseId);
+    .eq("id", responseId)
+    .select("ride_id, alert_id, user_id")
+    .maybeSingle();
   if (error) {
     console.warn("[sos] reached update failed", error.message);
     throw error;
   }
   console.info("[sos] reached", { responseId });
+  // Notify the raiser only that a responder has arrived.
+  const resp = data as { ride_id?: string; alert_id?: string; user_id?: string } | null;
+  if (resp?.ride_id && resp.alert_id && resp.user_id) {
+    const { data: alert } = await supabase
+      .from("sos_alerts")
+      .select("user_id")
+      .eq("id", resp.alert_id)
+      .maybeSingle();
+    const raiserUserId = (alert as { user_id?: string } | null)?.user_id;
+    if (raiserUserId) notifyRaiser(resp.ride_id, resp.user_id, raiserUserId, "has reached you.");
+  }
 }
 
 /** Resolve (close) an alert. Only the rider in distress may do this (RLS). */
@@ -500,6 +533,137 @@ export function useSosAlerts(rideId: string | null, selfUserId: string | null): 
 }
 
 export type Responder = { id: string; userId: string; name: string; reachedAt: string | null };
+
+/**
+ * Pure transition detector for the raiser's SosPage earcon/haptic (Task 2a).
+ * Given the previously-seen responders and the current list, returns the ones
+ * that are newly on the way (a responder id not seen before, not yet reached)
+ * and the ones that newly reached (seen before without reachedAt, now with it —
+ * or a brand-new responder that already shows reachedAt). Fires once per
+ * transition; callers seed `prev` from a ref so an already-populated initial
+ * load produces no diff (and no sound).
+ */
+export function diffResponders(
+  prev: Responder[],
+  next: Responder[],
+): { newOnTheWay: Responder[]; newReached: Responder[] } {
+  const prevById = new Map(prev.map((r) => [r.id, r]));
+  const newOnTheWay: Responder[] = [];
+  const newReached: Responder[] = [];
+  for (const r of next) {
+    const before = prevById.get(r.id);
+    if (!before) {
+      if (r.reachedAt) newReached.push(r);
+      else newOnTheWay.push(r);
+    } else if (!before.reachedAt && r.reachedAt) {
+      newReached.push(r);
+    }
+  }
+  return { newOnTheWay, newReached };
+}
+
+/**
+ * Pure status-line builder for the raiser's own SOS bar (Task 2b). Reached
+ * beats on-the-way beats waiting; with several on the way it names the first
+ * and counts the rest, mirroring SosAlertCard's compact detail text.
+ */
+export function buildOwnSosStatus(responders: Responder[]): string {
+  const reached = responders.filter((r) => r.reachedAt);
+  if (reached.length > 0) return `${reached[0].name} has reached you`;
+  const onWay = responders.filter((r) => !r.reachedAt);
+  if (onWay.length === 0) return "Waiting for a response…";
+  const extra = onWay.length - 1;
+  return extra > 0
+    ? `Help is coming: ${onWay[0].name} and ${extra} other${extra > 1 ? "s" : ""} on the way`
+    : `Help is coming: ${onWay[0].name} is on the way`;
+}
+
+/**
+ * The current user's own unresolved SOS alert in the ride, or null (Task 2b).
+ * useSosAlerts deliberately filters the raiser's own alert out, so this is the
+ * one hook that surfaces it — used by AppLayout to show the raiser a "help is
+ * coming" bar on every in-app screen except /sos. Rides on the same shared
+ * `ride-<id>` channel as useSosAlerts (rideChannel.ts), not a new channel.
+ */
+export function useOwnSosAlert(rideId: string | null, userId: string | null): IncomingAlert | null {
+  const [own, setOwn] = useState<IncomingAlert | null>(null);
+
+  useEffect(() => {
+    setOwn(null);
+    if (!rideId || !userId) return;
+
+    if (isDemoBackend) {
+      const derive = () => {
+        const a = demoAlerts()
+          .filter((x) => x.ride_id === rideId && x.user_id === userId && !x.resolved_at)
+          .at(-1);
+        setOwn(
+          a
+            ? {
+                id: a.id,
+                userId: a.user_id,
+                name: demoName(a.user_id),
+                triggeredAt: a.triggered_at,
+                resolved: false,
+                stayRequestedAt: a.stay_requested_at,
+              }
+            : null,
+        );
+      };
+      derive();
+      return subscribeDemo(derive);
+    }
+
+    let active = true;
+    const apply = (row: SosAlert) => {
+      if (!active || row.user_id !== userId) return;
+      if (row.resolved_at) {
+        setOwn((prev) => (prev && prev.id === row.id ? null : prev));
+        return;
+      }
+      setOwn({
+        id: row.id,
+        userId: row.user_id,
+        name: "You",
+        triggeredAt: row.triggered_at,
+        resolved: false,
+        stayRequestedAt: row.stay_requested_at,
+      });
+    };
+
+    supabase
+      .from("sos_alerts")
+      .select("*")
+      .eq("ride_id", rideId)
+      .eq("user_id", userId)
+      .is("resolved_at", null)
+      .order("triggered_at", { ascending: false })
+      .limit(1)
+      .then(({ data, error }) => {
+        if (error) {
+          console.warn("[sos] own alert fetch failed", error.message);
+          return;
+        }
+        const row = data?.[0] as SosAlert | undefined;
+        if (row) apply(row);
+      });
+
+    const handle = acquireRideChannel(rideId);
+    const onSosAlertsChange = (payload: PgChangePayload) => {
+      const row = payload.new as SosAlert;
+      if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") apply(row);
+    };
+    handle.listeners.sosAlerts.add(onSosAlertsChange);
+
+    return () => {
+      active = false;
+      handle.listeners.sosAlerts.delete(onSosAlertsChange);
+      handle.release();
+    };
+  }, [rideId, userId]);
+
+  return own;
+}
 
 /** Live map of alertId → responders (with names + reached state) for the ride. */
 export function useSosResponses(rideId: string | null): Record<string, Responder[]> {

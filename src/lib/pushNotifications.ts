@@ -159,9 +159,44 @@ export function usePushNotifications(
  * failure here (e.g. the function isn't deployed yet, or the device is
  * offline) never blocks the signal/SOS send it's attached to.
  */
-export function triggerPushNotify(rideId: string, senderUserId: string, kind: SignalKind): void {
+/** Push kinds the Edge Function understands: the four signals plus the
+ *  SOS-response notification (Task 2c) that goes to the raiser alone. */
+export type PushKind = SignalKind | "sos_response";
+
+export type TriggerPushOptions = {
+  /** When set, the worker notifies only this user's subscriptions (the SOS
+   *  raiser), instead of every ride member except the sender. */
+  targetUserId?: string;
+  /** Body detail phrase, used by the sos_response kind ("is on the way.",
+   *  "has reached you."). Ignored by the fixed-copy signal kinds. */
+  detail?: string;
+};
+
+/**
+ * Pure request-body builder for push-notify's client-facing path. Keeps
+ * optional fields off the body entirely when unset, so a plain signal enqueue
+ * is byte-identical to before this change. Unit-tested.
+ */
+export function buildPushNotifyBody(
+  rideId: string,
+  senderUserId: string,
+  kind: PushKind,
+  opts: TriggerPushOptions = {},
+): Record<string, string> {
+  const body: Record<string, string> = { ride_id: rideId, sender_user_id: senderUserId, kind };
+  if (opts.targetUserId) body.target_user_id = opts.targetUserId;
+  if (opts.detail) body.detail = opts.detail;
+  return body;
+}
+
+export function triggerPushNotify(
+  rideId: string,
+  senderUserId: string,
+  kind: PushKind,
+  opts?: TriggerPushOptions,
+): void {
   supabase.functions
-    .invoke("push-notify", { body: { ride_id: rideId, sender_user_id: senderUserId, kind } })
+    .invoke("push-notify", { body: buildPushNotifyBody(rideId, senderUserId, kind, opts) })
     .then(({ error }) => {
       if (error) console.warn("[push] trigger failed", error.message);
     })

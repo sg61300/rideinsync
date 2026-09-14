@@ -43,9 +43,14 @@ const lineStyle = {
 // using the app. One row: text block (status over detail) beside the action.
 // Opaque so page text behind it never shows through, with a soft shadow to
 // separate it from the page.
-const compactBarStyle = {
+// `flexWrap: "wrap"` lets the action(s) drop below the text on a narrow phone
+// (~360px) instead of squeezing the text column down to ~180px (which forced
+// "Gaurav P. needs help" to one word per line). On a wide viewport the row
+// never needs to wrap, so nothing changes there.
+export const compactBarStyle = {
   display: "flex",
   flexDirection: "row",
+  flexWrap: "wrap",
   alignItems: "center",
   gap: "var(--space-sm)",
   padding: "var(--space-xs) var(--space-md)",
@@ -54,8 +59,12 @@ const compactBarStyle = {
   border: "1px solid var(--color-divider)",
   boxShadow: "var(--shadow-card, 0 8px 24px rgba(0,0,0,.5))",
 } as const;
-const compactTextStyle = {
-  flex: 1,
+// `flex: "1 1 12rem"` (keep minWidth: 0) gives the text column a 12rem
+// preferred width: it stays on the action's row while there is room, and once
+// the viewport can't fit text + action side by side the wrap above kicks in
+// and the text takes the full width instead of collapsing.
+export const compactTextStyle = {
+  flex: "1 1 12rem",
   minWidth: 0,
 } as const;
 const compactLineAStyle = {

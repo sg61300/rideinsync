@@ -10,7 +10,7 @@ import { SosButton, shouldShowSos } from "./components/SosButton";
 import { HomeWallpaper, shouldShowWallpaper } from "./components/HomeWallpaper";
 import { consumePendingJoinCode, consumePendingGroupJoinCode } from "./services/authService";
 import { useActiveRide } from "./lib/activeRide";
-import { canResolveSos, markReached, resolveSosAlert, respondToSos, sosCardState, useMyRideRole, useSosAlerts, useSosResponses, type IncomingAlert } from "./lib/sos";
+import { buildOwnSosStatus, canResolveSos, markReached, resolveSosAlert, respondToSos, sosCardState, useMyRideRole, useOwnSosAlert, useSosAlerts, useSosResponses, type IncomingAlert } from "./lib/sos";
 import { VoicePermissionSheet } from "./components/VoicePermissionSheet";
 import { usePersistedToggle } from "./lib/preference";
 import { useVoiceCommand, VOICE_COMMANDS_KEY } from "./lib/voiceCommands";
@@ -91,6 +91,11 @@ export function AppLayout() {
 
   const alerts = useSosAlerts(inApp ? rideId : null, userId);
   const responsesByAlert = useSosResponses(inApp ? rideId : null);
+  // The raiser's OWN unresolved alert (useSosAlerts filters it out). Drives a
+  // "help is coming" bar shown to the raiser on every in-app screen but /sos,
+  // which has its own responder list. Hidden on /sos to avoid doubling up.
+  const ownAlert = useOwnSosAlert(inApp ? rideId : null, userId);
+  const showOwnSosBar = Boolean(ownAlert) && pathname !== "/sos";
   const myRole = useMyRideRole(inApp ? rideId : null, userId);
   const canResolve = canResolveSos(myRole);
 
@@ -283,7 +288,7 @@ export function AppLayout() {
         <Outlet />
       </div>
 
-      {inApp && visibleAlerts.length > 0 && (
+      {inApp && (visibleAlerts.length > 0 || showOwnSosBar) && (
         <div
           style={{
             position: "fixed",
@@ -301,6 +306,43 @@ export function AppLayout() {
             gap: "var(--space-sm)",
           }}
         >
+          {showOwnSosBar && ownAlert && (
+            <button
+              type="button"
+              onClick={() => navigate("/sos")}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "var(--space-sm)",
+                width: "100%",
+                textAlign: "left",
+                padding: "var(--space-xs) var(--space-md)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--color-surface-2)",
+                border: "1px solid var(--color-divider)",
+                boxShadow: "var(--shadow-card, 0 8px 24px rgba(0,0,0,.5))",
+                color: "var(--color-text-primary)",
+                fontSize: "var(--text-body-strong)",
+                fontWeight: "var(--weight-semibold)" as unknown as number,
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ minWidth: 0 }}>
+                {buildOwnSosStatus(responsesByAlert[ownAlert.id] ?? [])}
+              </span>
+              <span
+                style={{
+                  flexShrink: 0,
+                  color: "var(--color-text-secondary)",
+                  fontSize: "var(--text-label)",
+                  fontWeight: "var(--weight-regular)" as unknown as number,
+                }}
+              >
+                View
+              </span>
+            </button>
+          )}
           {visibleAlerts.map(({ alert: a, still }) => (
             <SosAlertCard
               key={a.id}

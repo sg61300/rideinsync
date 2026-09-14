@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -7,13 +7,23 @@ import { useSession } from "../lib/auth";
 import { useActiveRide } from "../lib/activeRide";
 import {
   closeSos,
+  diffResponders,
   sendSos,
   startSosTracking,
   staySos,
   stopSosTracking,
   useSosResponses,
+  type Responder,
 } from "../lib/sos";
 import { playSignalTone } from "../lib/earcon";
+import { vibrateForTier } from "../lib/haptics";
+import type { SignalTier } from "../lib/signals";
+
+// A responder arriving is reassuring, not an emergency, so it uses the High
+// "attention" tier (a descending two-note chime) rather than the Critical
+// siren the raiser already heard on send. One tier drives both the earcon and
+// the haptic pulse, per signals_haptics_plan.md §7e.
+const RESPONSE_TIER: SignalTier = "high";
 
 type Phase = "no-ride" | "confirm" | "countdown" | "sending" | "sent" | "error";
 
@@ -50,6 +60,25 @@ export function SosPage() {
   const responders = alertId ? responsesByAlert[alertId] ?? [] : [];
   const reachedPending = responders.filter((r) => r.reachedAt && !stayedIds.has(r.id));
   const prompt = reachedPending[0] ?? null;
+
+  // Alert the raiser (earcon + haptic) when a responder newly appears or newly
+  // reaches them. Seed from a ref so an already-populated first render (e.g.
+  // returning to the page) produces no diff and no sound — it only fires on a
+  // real transition.
+  const seenResponders = useRef<Responder[] | null>(null);
+  useEffect(() => {
+    const prev = seenResponders.current;
+    seenResponders.current = responders;
+    if (prev === null) return; // baseline capture — never fire on initial load
+    const { newOnTheWay, newReached } = diffResponders(prev, responders);
+    if (newOnTheWay.length === 0 && newReached.length === 0) return;
+    console.info("[sos] responder transition", {
+      newOnTheWay: newOnTheWay.length,
+      newReached: newReached.length,
+    });
+    playSignalTone(RESPONSE_TIER);
+    vibrateForTier(RESPONSE_TIER);
+  }, [responders]);
 
   // Fall into no-ride only before any action has been taken.
   useEffect(() => {
