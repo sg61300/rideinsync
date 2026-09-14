@@ -104,7 +104,7 @@ Deno.serve(async (req) => {
     return json({ skipped: true, reason: "no_smtp_credentials" });
   }
 
-  let body: { alert_id?: string };
+  let body: { alert_id?: string; event?: string };
   try {
     body = await req.json();
   } catch {
@@ -115,6 +115,10 @@ Deno.serve(async (req) => {
     console.warn("[send-sos-email] missing alert_id");
     return new Response("Missing alert_id", { status: 400 });
   }
+  // "cancelled" sends the stand-down notice; anything else (incl. absent) is the
+  // original raised alert. Keeps the raised path unchanged.
+  const event: "raised" | "cancelled" = body.event === "cancelled" ? "cancelled" : "raised";
+  console.log("[send-sos-email] request", { alertId, event });
 
   // Load the alert (service role — bypasses RLS to read the payload/user_id).
   const { data: alert, error: alertErr } = await serviceClient
@@ -167,8 +171,10 @@ Deno.serve(async (req) => {
   const content = buildSosEmailContent({
     senderName: sender?.display_name ?? null,
     rideName: ride?.name ?? null,
-    location: locationFromPayload(alert.payload),
+    // Cancel notice carries no location/map link (see the builder).
+    location: event === "cancelled" ? null : locationFromPayload(alert.payload),
     triggeredAt: alert.triggered_at ?? null,
+    event,
   });
 
   const results = await Promise.allSettled(recipients.map((to) => sendEmail(to, content)));
@@ -179,7 +185,7 @@ Deno.serve(async (req) => {
       console.error(`[send-sos-email] send to ${recipients[i]} failed`, r.reason?.message ?? r.reason);
     }
   });
-  console.log("[send-sos-email] done", { alertId, recipients: recipients.length, sent, failed });
+  console.log("[send-sos-email] done", { alertId, event, recipients: recipients.length, sent, failed });
 
   return json({ sent, failed });
 });

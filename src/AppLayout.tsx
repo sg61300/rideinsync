@@ -121,6 +121,24 @@ export function AppLayout() {
     }
   }, [alerts]);
 
+  // A brief toast when someone else's SOS this device was showing flips to
+  // cancelled — the card vanishes on its own (sosCardState hides a resolved
+  // alert), so this is just a courtesy stand-down note. Fired once per alert.
+  // An alert only enters `alerts` unresolved (useSosAlerts' initial fetch
+  // filters resolved out), so `cancelled` here is always a real transition.
+  const cancelToastedIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const a of alerts) {
+      if (a.cancelled && !cancelToastedIds.current.has(a.id)) {
+        cancelToastedIds.current.add(a.id);
+        console.info("[sos] cancel toast", { alertId: a.id });
+        showVoiceFeedback(`${a.name} cancelled their SOS`);
+      }
+    }
+    // showVoiceFeedback is a stable hoisted declaration; alerts drives this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alerts]);
+
   function handleRespond(alertId: string) {
     if (!rideId || !userId) return;
     void respondToSos(alertId, rideId, userId).catch(() => {

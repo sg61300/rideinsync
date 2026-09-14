@@ -6,6 +6,7 @@ import { HOME } from "../routes";
 import { useSession } from "../lib/auth";
 import { useActiveRide } from "../lib/activeRide";
 import {
+  cancelSosAlert,
   closeSos,
   diffResponders,
   sendSos,
@@ -25,7 +26,7 @@ import type { SignalTier } from "../lib/signals";
 // the haptic pulse, per signals_haptics_plan.md §7e.
 const RESPONSE_TIER: SignalTier = "high";
 
-type Phase = "no-ride" | "confirm" | "countdown" | "sending" | "sent" | "error";
+type Phase = "no-ride" | "confirm" | "countdown" | "sending" | "sent" | "cancelled" | "error";
 
 const headingStyle = {
   margin: "0 0 var(--space-sm)",
@@ -55,6 +56,8 @@ export function SosPage() {
   const [hasLocation, setHasLocation] = useState(true);
   // Responders the rider has acknowledged with "Stay"; a later reach re-prompts.
   const [stayedIds, setStayedIds] = useState<Set<string>>(new Set());
+  // Inline "Cancel your SOS request?" confirm, shown over the sent screen.
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   const responsesByAlert = useSosResponses(phase === "sent" ? rideId : null);
   const responders = alertId ? responsesByAlert[alertId] ?? [] : [];
@@ -151,6 +154,22 @@ export function SosPage() {
     navigate(HOME); // unmount clears tracking interval + realtime channel
   }
 
+  async function onConfirmCancel() {
+    setConfirmCancel(false);
+    if (!alertId || !rideId || !userId) {
+      // Nothing to cancel server-side; just leave the SOS screen.
+      setPhase("cancelled");
+      return;
+    }
+    try {
+      await cancelSosAlert(alertId, rideId, userId);
+      setPhase("cancelled");
+    } catch {
+      // RPC failed → the SOS is NOT cancelled. Stay on the sent screen so the
+      // rider can retry; the failure is logged in cancelSosAlert.
+    }
+  }
+
   if (phase === "no-ride") {
     return (
       <Card>
@@ -238,8 +257,49 @@ export function SosPage() {
           </Card>
         )}
 
+        {confirmCancel ? (
+          <Card
+            elevated
+            role="alertdialog"
+            aria-label="Cancel your SOS request?"
+            style={{
+              margin: "var(--space-md) 0 0",
+              display: "flex",
+              flexDirection: "column",
+              gap: "var(--space-sm)",
+            }}
+          >
+            <p style={{ ...bodyStyle, margin: 0 }}>Cancel your SOS request?</p>
+            <Button variant="danger" onClick={() => void onConfirmCancel()}>
+              Yes, cancel
+            </Button>
+            <Button variant="secondary" onClick={() => setConfirmCancel(false)}>
+              Keep SOS
+            </Button>
+          </Card>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
+            <Button variant="secondary" onClick={() => setConfirmCancel(true)}>
+              Cancel SOS
+            </Button>
+            <Button variant="secondary" onClick={goHome}>
+              Back to home
+            </Button>
+          </div>
+        )}
+      </Card>
+    );
+  }
+
+  if (phase === "cancelled") {
+    return (
+      <Card>
+        <h1 style={headingStyle}>SOS cancelled</h1>
+        <p style={bodyStyle}>
+          The group and your emergency contact have been told.
+        </p>
         <Button variant="secondary" onClick={goHome}>
-          Back to home
+          Back to ride
         </Button>
       </Card>
     );

@@ -81,13 +81,14 @@ const QUEUE_BATCH_SIZE = 25;
 // the way or has reached the rider. Its body copy is decided by the job's
 // `detail` string ("is on the way.", "has reached you."), so both cases reuse
 // this single kind rather than adding a second.
-type SignalKind = "hazard" | "regroup" | "pitstop" | "sos" | "sos_response";
+type SignalKind = "hazard" | "regroup" | "pitstop" | "sos" | "sos_response" | "sos_cancelled";
 const KIND_TITLE: Record<SignalKind, string> = {
   hazard: "Hazard",
   regroup: "Regroup",
   pitstop: "Pit stop",
   sos: "SOS",
   sos_response: "Help is coming",
+  sos_cancelled: "SOS cancelled",
 };
 
 type PushJobRow = {
@@ -113,6 +114,8 @@ function bodyFor(kind: SignalKind, senderName: string, detail: string | null): s
       return `${senderName} needs help. Location shared.`;
     case "sos_response":
       return `${senderName} ${detail ?? "is on the way."}`;
+    case "sos_cancelled":
+      return detail ?? `${senderName} cancelled their SOS.`;
   }
 }
 
@@ -143,14 +146,19 @@ async function sendForJob(job: PushJobRow): Promise<{ sent: number; failed: numb
 
   const senderName = sender?.display_name ?? "A rider";
   const isUrgent = kind === "sos";
+  // Per §10's push-dedup rules: sos gets a unique tag per event so concurrent
+  // SOS cases stack instead of replacing each other; sos_cancelled collapses
+  // per ride (a stand-down, not urgent); the routine signals share one tag per
+  // (ride, kind) so a flurry of the same signal collapses to one notification.
+  const tag = isUrgent
+    ? `sos-${sender_user_id}-${Date.now()}`
+    : kind === "sos_cancelled"
+      ? `sos-cancelled-${ride_id}`
+      : `${kind}-${ride_id}`;
   const payload = JSON.stringify({
     title: KIND_TITLE[kind],
     body: bodyFor(kind, senderName, detail),
-    // Per §10's push-dedup rules: sos gets a unique tag per event so
-    // concurrent SOS cases stack instead of replacing each other; the
-    // routine signals share one tag per (ride, kind) so a flurry of the same
-    // signal collapses to one notification instead of spamming the tray.
-    tag: isUrgent ? `sos-${sender_user_id}-${Date.now()}` : `${kind}-${ride_id}`,
+    tag,
     urgent: isUrgent,
   });
 

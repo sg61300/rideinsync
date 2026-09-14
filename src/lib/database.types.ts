@@ -15,7 +15,7 @@ export type RideStatus = "draft" | "active" | "ended" | "cancelled";
 export type MemberStatus = "riding" | "stopped" | "rejoining" | "leaving" | "arrived";
 export type EventType =
   | "sos" | "hazard" | "route_change" | "stop" | "rejoin"
-  | "leave" | "regroup" | "pitstop" | "separation" | "arrived" | "badge_awarded";
+  | "leave" | "regroup" | "pitstop" | "separation" | "arrived" | "badge_awarded" | "sos_cancelled";
 export type TravelMode = "motorcycle" | "car" | "cycle";
 export type FeedbackSentiment = "like" | "dislike" | "can_be_better";
 export type StoppageReason = "fuel" | "rest" | "mechanical" | "traffic" | "medical" | "other";
@@ -193,9 +193,9 @@ export interface Database {
         { ride_id: string; created_by: string; kind?: PitstopKind; location?: Json | null; note?: string | null }
       >;
       sos_alerts: Table<
-        { id: string; ride_id: string; user_id: string; kind: SosKind; payload: Json | null; triggered_at: string; resolved_at: string | null; resolved_by: string | null; stay_requested_at: string | null },
+        { id: string; ride_id: string; user_id: string; kind: SosKind; payload: Json | null; triggered_at: string; resolved_at: string | null; resolved_by: string | null; stay_requested_at: string | null; cancelled_at: string | null },
         { ride_id: string; user_id: string; kind: SosKind; payload?: Json | null },
-        { resolved_at?: string | null; resolved_by?: string | null; stay_requested_at?: string | null }
+        { resolved_at?: string | null; resolved_by?: string | null; stay_requested_at?: string | null; cancelled_at?: string | null }
       >;
       // Flow 5 (migration 0002_sos.sql) — hand-authored mirror; regenerate later.
       sos_responses: Table<
@@ -258,6 +258,8 @@ export interface Database {
       join_group_by_code: { Args: { p_code: string }; Returns: string };
       // supabase/migrations/0022_raise_sos_alert.sql — M0 correctness hardening.
       raise_sos_alert: { Args: { p_ride_id: string; p_user_id: string; p_payload: Json }; Returns: string };
+      // supabase/migrations/0032_sos_cancel.sql — raiser cancels their own SOS.
+      cancel_sos_alert: { Args: { p_alert_id: string }; Returns: Database["public"]["Tables"]["sos_alerts"]["Row"] };
     };
     Enums: {
       member_role: MemberRole;

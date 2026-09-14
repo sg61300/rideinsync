@@ -20,6 +20,9 @@ export type SosEmailInput = {
   location: SosEmailLocation;
   /** ISO timestamp the alert was raised, for the email body. */
   triggeredAt?: string | null;
+  /** "raised" (default) sends the alert email; "cancelled" sends the stand-down
+   *  notice — "<name> has cancelled their SOS" + time, no location/map link. */
+  event?: "raised" | "cancelled";
 };
 
 export type SosEmailContent = { subject: string; text: string; html: string };
@@ -63,6 +66,33 @@ export function buildSosEmailContent(input: SosEmailInput): SosEmailContent {
   const name = displayName(input.senderName);
   const ride = (input.rideName ?? "").trim();
   const when = (input.triggeredAt ?? "").trim();
+
+  // Cancel notice: the raiser stood the SOS down. No location / map link — the
+  // emergency is over; the contact just needs to know it was cancelled.
+  if (input.event === "cancelled") {
+    const subject = ride
+      ? `${name} has cancelled their SOS on ${ride}`
+      : `${name} has cancelled their SOS`;
+    const clines: string[] = [];
+    clines.push(`${name} has cancelled their SOS. They are no longer requesting help.`);
+    if (ride) clines.push(`Ride: ${ride}`);
+    if (when) clines.push(`Original SOS raised at: ${when}`);
+    clines.push("");
+    clines.push("This message was sent automatically by RideInSync.");
+    const ctext = clines.join("\n");
+
+    const chtml: string[] = [];
+    chtml.push(`<h2 style="margin:0 0 12px">SOS cancelled by ${escapeHtml(name)}</h2>`);
+    chtml.push(
+      `<p style="margin:0 0 8px">${escapeHtml(name)} has cancelled their SOS. They are no longer requesting help.</p>`,
+    );
+    if (ride) chtml.push(`<p style="margin:0 0 8px"><strong>Ride:</strong> ${escapeHtml(ride)}</p>`);
+    if (when) chtml.push(`<p style="margin:0 0 8px"><strong>Original SOS raised at:</strong> ${escapeHtml(when)}</p>`);
+    chtml.push(
+      `<p style="margin:16px 0 0;color:#666;font-size:13px">This message was sent automatically by RideInSync.</p>`,
+    );
+    return { subject, text: ctext, html: chtml.join("") };
+  }
 
   const subject = ride ? `SOS: ${name} needs help on ${ride}` : `SOS: ${name} needs help`;
 

@@ -30,10 +30,18 @@ export function isValidEmail(email: string): boolean {
  * functions client missing) is logged and swallowed so the SOS itself is never
  * blocked. Called once in sos.ts right after triggerPushNotify.
  */
-export function triggerSosEmail(alertId: string): void {
+export function triggerSosEmail(
+  alertId: string,
+  opts?: { event?: "raised" | "cancelled" },
+): void {
   try {
+    // Keep the "raised" body byte-identical to before this change (no `event`
+    // key) so the default path — and the edge function's default — is unchanged;
+    // only the cancel path adds it.
+    const body: { alert_id: string; event?: "cancelled" } = { alert_id: alertId };
+    if (opts?.event === "cancelled") body.event = "cancelled";
     void Promise.resolve(
-      supabase.functions.invoke("send-sos-email", { body: { alert_id: alertId } }),
+      supabase.functions.invoke("send-sos-email", { body }),
     )
       .then((res) => {
         const error = (res as { error?: { message?: string } } | null)?.error;

@@ -161,7 +161,7 @@ export function usePushNotifications(
  */
 /** Push kinds the Edge Function understands: the four signals plus the
  *  SOS-response notification (Task 2c) that goes to the raiser alone. */
-export type PushKind = SignalKind | "sos_response";
+export type PushKind = SignalKind | "sos_response" | "sos_cancelled";
 
 export type TriggerPushOptions = {
   /** When set, the worker notifies only this user's subscriptions (the SOS

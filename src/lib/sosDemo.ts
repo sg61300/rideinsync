@@ -84,6 +84,7 @@ export async function demoSendSos(rideId: string, userId: string): Promise<SendS
     resolved_at: null,
     resolved_by: null,
     stay_requested_at: null,
+    cancelled_at: null,
   };
   store.alerts.push(alert);
   console.info("[sos:demo] alert sent", { alertId: alert.id, rideId, userId });
@@ -141,6 +142,23 @@ export async function demoCloseSos(alertId: string, userId: string): Promise<voi
   alert.resolved_at = new Date().toISOString();
   alert.resolved_by = userId;
   console.info("[sos:demo] closed", { alertId });
+  emit();
+}
+
+export async function demoCancelSos(alertId: string, userId: string): Promise<void> {
+  const alert = store.alerts.find((a) => a.id === alertId);
+  if (!alert) {
+    console.warn("[sos:demo] cancel: alert not found", { alertId });
+    return;
+  }
+  const now = new Date().toISOString();
+  alert.resolved_at = now;
+  alert.resolved_by = userId;
+  alert.cancelled_at = now;
+  // Drop this alert's responses too, so the demo mirrors "every card vanishes":
+  // the compact bar keyed off responders disappears alongside the alert.
+  store.responses = store.responses.filter((r) => r.alert_id !== alertId);
+  console.info("[sos:demo] cancelled", { alertId });
   emit();
 }
 

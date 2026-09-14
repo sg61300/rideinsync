@@ -97,6 +97,33 @@ test("buildSosEmailContent escapes HTML in dynamic fields", () => {
   assert.ok(c.text.includes('Ann <b>"x"</b>'));
 });
 
+// ---- cancelled variant (stand-down notice) ---------------------------------
+
+test("buildSosEmailContent cancelled variant: subject + body, no map link", () => {
+  const c = buildSosEmailContent({
+    senderName: "Alex R.",
+    rideName: "Nandi Hills Run",
+    // A cancel notice ignores location; even if one were passed, no link.
+    location: { lat: 12.34, lng: 56.78, accuracy: 15, recorded_at: null },
+    triggeredAt: "2026-09-14T10:00:00Z",
+    event: "cancelled",
+  });
+  assert.equal(c.subject, "Alex R. has cancelled their SOS on Nandi Hills Run");
+  assert.ok(c.text.startsWith("Alex R. has cancelled their SOS"), "text leads with cancel");
+  assert.ok(c.text.includes("Nandi Hills Run"), "ride name in text");
+  assert.ok(c.text.includes("2026-09-14T10:00:00Z"), "original raised time in text");
+  assert.ok(!c.text.includes("maps.google.com"), "no maps link in a cancel notice");
+  assert.ok(!c.html.includes("maps.google.com"), "no maps link in cancel html");
+  assert.ok(c.html.includes("SOS cancelled by Alex R."), "cancel html heading");
+});
+
+test("buildSosEmailContent cancelled variant: falls back to 'A rider', drops blank ride", () => {
+  const c = buildSosEmailContent({ senderName: null, rideName: "", location: null, event: "cancelled" });
+  assert.equal(c.subject, "A rider has cancelled their SOS", "no ride in subject");
+  assert.ok(c.text.startsWith("A rider has cancelled their SOS"), "fallback name");
+  assert.ok(!c.text.includes("Ride:"), "no ride line when blank");
+});
+
 // ---- triggerSosEmail must never throw / reject -----------------------------
 
 test("triggerSosEmail swallows a rejected invoke (no throw, no unhandled rejection)", async () => {
