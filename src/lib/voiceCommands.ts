@@ -7,6 +7,10 @@ import { useEffect, useRef, useState } from "react";
 import type { Model, KaldiRecognizer } from "vosk-browser";
 import { SIGNAL_LABEL, type SignalKind } from "./signals";
 import { publishVoiceAudioLevel, publishVoiceDetection, publishVoicePartial } from "./voiceActivity";
+// The wake word, command vocabulary, and the whole-utterance matcher live in
+// voicePhrase.ts (pure + unit-tested). Importing them here keeps the Vosk
+// grammar below and the matcher on one single source of truth.
+import { WAKE_WORD, COMMAND_WORDS, parseVoiceUtterance } from "./voicePhrase";
 
 // ============================================================================
 // "Sync, ___" wake word + signal command, via Vosk (on-device, WASM, grammar-
@@ -40,29 +44,22 @@ export const VOICE_COMMANDS_KEY = "voice.commands";
 const MODEL_URL = "https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz";
 const SAMPLE_RATE = 16_000;
 
-const WAKE_WORD = "sync";
-
-const COMMAND_WORDS: { kind: SignalKind; words: string[] }[] = [
-  { kind: "sos", words: ["sos", "emergency"] },
-  { kind: "hazard", words: ["hazard"] },
-  { kind: "regroup", words: ["regroup"] },
-  { kind: "pitstop", words: ["pit stop"] },
-];
-
 // The fixed vocabulary Vosk is allowed to output. "[unk]" is Vosk's standard
 // catch-all for speech that doesn't match anything else in the grammar —
 // without it, every utterance gets forced into the closest grammar word,
-// which would misfire constantly on ordinary conversation.
+// which would misfire constantly on ordinary conversation. Built from the same
+// WAKE_WORD/COMMAND_WORDS the matcher uses, so the two never drift.
 const GRAMMAR = JSON.stringify([
   "[unk]",
   WAKE_WORD,
   ...COMMAND_WORDS.flatMap((c) => c.words),
 ]);
 
-function wordToKind(word: string): SignalKind | null {
-  const w = word.toLowerCase().trim();
-  return COMMAND_WORDS.find((c) => c.words.includes(w))?.kind ?? null;
-}
+// How long after "recognition started" without a single onaudioprocess
+// callback before we warn: this is the signature of a ScriptProcessorNode with
+// no path to the destination (Chromium won't pull it), which produced 0
+// callbacks in 5s in production and total silence with nothing in the console.
+const AUDIOPROCESS_WATCHDOG_MS = 3_000;
 
 // Shorter than the old SOS-only debounce: these are routine, repeatable
 // actions, not a one-shot distress trigger.
@@ -147,6 +144,13 @@ export function useVoiceCommand({
     let audioContext: AudioContext | null = null;
     let recognizer: KaldiRecognizer | null = null;
     let activateTimer: number | null = null;
+    // Audio graph nodes — held at effect scope so cleanup can disconnect them
+    // (see Defect A: an un-disconnected ScriptProcessorNode also leaks).
+    let mediaSource: MediaStreamAudioSourceNode | null = null;
+    let scriptNode: ScriptProcessorNode | null = null;
+    // Watchdog for "recognition started but no audio callback ever fires".
+    let audioWatchdog: number | null = null;
+    let gotAudioCallback = false;
 
     // Publishes what Vosk finalized and what the app decided to do about it,
     // for the mic button's live "heard X -> doing Y" caption, plus a matching
@@ -156,70 +160,76 @@ export function useVoiceCommand({
       console.log(`[voice] detected "${word}" -> ${action}`);
     }
 
+    // Fire a signal command, respecting the debounce. Returns false (and logs
+    // the "ignored" reason) if it was too soon after the previous trigger.
+    function triggerCommand(text: string, kind: SignalKind): boolean {
+      const now = Date.now();
+      if (now - lastTriggerRef.current < DEBOUNCE_MS) {
+        detect(text, "ignored (too soon after the last command)");
+        return false;
+      }
+      lastTriggerRef.current = now;
+      detect(text, `${SIGNAL_LABEL[kind]} triggered`);
+      onCommandRef.current(kind);
+      return true;
+    }
+
     function handleWord(word: string) {
       const w = word.toLowerCase().trim();
       if (!w) return;
       console.log(`[voice] heard: "${w}"`);
       publishVoicePartial("");
 
-      // Signal picker already open — a bare signal name is enough, no need
-      // to repeat the wake word before every choice.
-      if (bareCommandsRef.current) {
-        const bareKind = wordToKind(w);
-        if (bareKind) {
-          const now = Date.now();
-          if (now - lastTriggerRef.current < DEBOUNCE_MS) {
-            detect(w, "ignored (too soon after the last command)");
-            return;
-          }
-          lastTriggerRef.current = now;
-          detect(w, `${SIGNAL_LABEL[bareKind]} triggered`);
-          onCommandRef.current(bareKind);
-          return;
-        }
-      }
+      // Tokenised, whole-utterance parse (Vosk hands us the full utterance,
+      // e.g. "sync hazard" — not one word at a time). Pure + unit-tested in
+      // voicePhrase.test.ts.
+      const parsed = parseVoiceUtterance(w, { bareCommandsEnabled: bareCommandsRef.current });
 
-      if (w === WAKE_WORD) {
-        // Wake word heard, no command yet — give it a moment in case the
-        // command arrives as the next utterance before treating it as bare
-        // activation.
-        if (activateTimer != null) window.clearTimeout(activateTimer);
-        detect(w, "waiting for a command");
-        activateTimer = window.setTimeout(() => {
-          activateTimer = null;
-          const now = Date.now();
-          if (now - lastTriggerRef.current < DEBOUNCE_MS) {
-            detect(w, "ignored (too soon after the last command)");
-            return;
-          }
-          lastTriggerRef.current = now;
-          detect(w, "activated");
-          onActivateRef.current?.();
-        }, ACTIVATE_GRACE_MS);
+      if (!parsed) {
+        detect(w, "not recognized");
         return;
       }
 
-      const kind = wordToKind(w);
-      if (kind) {
+      // Wake word + command in the same utterance, or a bare command while the
+      // picker is open — fire it now, cancelling any pending activation.
+      if ("kind" in parsed && !("needsWake" in parsed)) {
         if (activateTimer != null) {
-          // A command arrived right after the wake word.
           window.clearTimeout(activateTimer);
           activateTimer = null;
-          const now = Date.now();
-          if (now - lastTriggerRef.current < DEBOUNCE_MS) {
-            detect(w, "ignored (too soon after the last command)");
-            return;
-          }
-          lastTriggerRef.current = now;
-          detect(w, `${SIGNAL_LABEL[kind]} triggered`);
-          onCommandRef.current(kind);
+        }
+        triggerCommand(w, parsed.kind);
+        return;
+      }
+
+      // Command with no wake word (bare mode off).
+      if ("needsWake" in parsed) {
+        if (activateTimer != null) {
+          // The wake word was heard as the PREVIOUS utterance and we're inside
+          // the grace window — this command completes it.
+          window.clearTimeout(activateTimer);
+          activateTimer = null;
+          triggerCommand(w, parsed.kind);
           return;
         }
         detect(w, `heard, but say "${WAKE_WORD}" first`);
         return;
       }
 
-      detect(w, "not recognized");
+      // Bare wake word, no command yet — give it a moment in case the command
+      // arrives as the next utterance before treating it as bare activation.
+      if (activateTimer != null) window.clearTimeout(activateTimer);
+      detect(w, "waiting for a command");
+      activateTimer = window.setTimeout(() => {
+        activateTimer = null;
+        const now = Date.now();
+        if (now - lastTriggerRef.current < DEBOUNCE_MS) {
+          detect(w, "ignored (too soon after the last command)");
+          return;
+        }
+        lastTriggerRef.current = now;
+        detect(w, "activated");
+        onActivateRef.current?.();
+      }, ACTIVATE_GRACE_MS);
     }
 
     (async () => {
@@ -279,11 +289,22 @@ export function useVoiceCommand({
           return;
         }
         const source = audioContext.createMediaStreamSource(stream);
+        mediaSource = source;
         // ScriptProcessorNode is deprecated but is what the library's own
         // examples use, and AudioWorklet would need a separate module file
         // served alongside it — not worth the extra moving part here.
         const node = audioContext.createScriptProcessor(4_096, 1, 1);
+        scriptNode = node;
         node.onaudioprocess = (event) => {
+          // First callback: the audio graph is actually pulling — cancel the
+          // silent-failure watchdog.
+          if (!gotAudioCallback) {
+            gotAudioCallback = true;
+            if (audioWatchdog != null) {
+              window.clearTimeout(audioWatchdog);
+              audioWatchdog = null;
+            }
+          }
           // RMS of this buffer, scaled up so ordinary speech actually moves
           // the meter (raw mic RMS at normal gain sits well under 1.0) — this
           // is "is there audio around" feedback, independent of whether Vosk
@@ -301,11 +322,31 @@ export function useVoiceCommand({
           }
         };
         source.connect(node);
+        // Defect A: Chromium (desktop Chrome AND the Android WebView) does not
+        // pull a ScriptProcessorNode that has no path to the destination, so
+        // onaudioprocess never fires — 0 callbacks in 5s in production, silent
+        // with nothing in the console. Connecting it to the destination makes
+        // the graph run. The onaudioprocess handler above never writes to the
+        // output buffer, and a ScriptProcessor's output buffer starts zeroed
+        // each callback, so this path stays silent (no mic echo).
+        node.connect(audioContext.destination);
 
         if (!cancelled) {
           setListening(true);
           setError(null);
           console.log("[voice] recognition started");
+          // Arm the silent-failure watchdog: if no audio callback arrives soon
+          // after "started", something in the graph isn't being pulled.
+          gotAudioCallback = false;
+          audioWatchdog = window.setTimeout(() => {
+            audioWatchdog = null;
+            if (!gotAudioCallback) {
+              console.warn(
+                `[voice] no audioprocess callback within ${AUDIOPROCESS_WATCHDOG_MS}ms of ` +
+                  `"recognition started" — audio graph is not being pulled (no audio reaching the recognizer)`,
+              );
+            }
+          }, AUDIOPROCESS_WATCHDOG_MS);
         }
       } catch (err) {
         if (cancelled) return;
@@ -331,6 +372,19 @@ export function useVoiceCommand({
     return () => {
       cancelled = true;
       if (activateTimer != null) window.clearTimeout(activateTimer);
+      if (audioWatchdog != null) window.clearTimeout(audioWatchdog);
+      // Tear down the audio graph so nodes don't linger past teardown.
+      try {
+        scriptNode?.disconnect();
+      } catch {
+        /* ignore */
+      }
+      if (scriptNode) scriptNode.onaudioprocess = null;
+      try {
+        mediaSource?.disconnect();
+      } catch {
+        /* ignore */
+      }
       try {
         recognizer?.remove();
       } catch {

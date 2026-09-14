@@ -48,4 +48,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Voice commands (Vosk in the WebView). getUserMedia in the Capacitor
+         WebView is denied without RECORD_AUDIO; the runtime prompt is raised by
+         Capacitor's BridgeWebChromeClient.onPermissionRequest when the WebView
+         asks for AUDIO_CAPTURE, but only if the permission is declared here. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 </manifest>
