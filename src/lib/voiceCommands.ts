@@ -10,7 +10,7 @@ import { publishVoiceAudioLevel, publishVoiceDetection, publishVoicePartial } fr
 // The wake word, command vocabulary, and the whole-utterance matcher live in
 // voicePhrase.ts (pure + unit-tested). Importing them here keeps the Vosk
 // grammar below and the matcher on one single source of truth.
-import { WAKE_WORD, COMMAND_WORDS, parseVoiceUtterance } from "./voicePhrase";
+import { WAKE_WORD, COMMAND_WORDS, parseVoiceUtterance, shouldFireBareCommand } from "./voicePhrase";
 
 // ============================================================================
 // "Sync, ___" wake word + signal command, via Vosk (on-device, WASM, grammar-
@@ -190,28 +190,23 @@ export function useVoiceCommand({
         return;
       }
 
-      // Wake word + command in the same utterance, or a bare command while the
-      // picker is open — fire it now, cancelling any pending activation.
-      if ("kind" in parsed && !("needsWake" in parsed)) {
-        if (activateTimer != null) {
-          window.clearTimeout(activateTimer);
-          activateTimer = null;
-        }
-        triggerCommand(w, parsed.kind);
-        return;
-      }
-
-      // Command with no wake word (bare mode off).
-      if ("needsWake" in parsed) {
-        if (activateTimer != null) {
-          // The wake word was heard as the PREVIOUS utterance and we're inside
-          // the grace window — this command completes it.
-          window.clearTimeout(activateTimer);
-          activateTimer = null;
+      if ("kind" in parsed) {
+        if (shouldFireBareCommand(parsed, Boolean(bareCommandsRef.current))) {
+          // Wake word + command in the same utterance, or a bare command while
+          // the picker is open — fire it now, cancelling any pending activation.
+          if (activateTimer != null) {
+            window.clearTimeout(activateTimer);
+            activateTimer = null;
+          }
           triggerCommand(w, parsed.kind);
-          return;
+        } else {
+          // Command with no wake word in the SAME utterance. Founder ruling
+          // 2026-09-16: a wake word heard as a previous utterance must NOT
+          // complete into a command (that cross-utterance completion auto-fired
+          // SOS). Prompt the one-breath form and leave any activate timer
+          // running — it resolves to a bare "activate" on its own.
+          detect(w, `say "${WAKE_WORD} ${w}" together`);
         }
-        detect(w, `heard, but say "${WAKE_WORD}" first`);
         return;
       }
 

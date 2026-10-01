@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseVoiceUtterance, WAKE_WORD, COMMAND_WORDS } from "./voicePhrase";
+import { parseVoiceUtterance, shouldFireBareCommand, WAKE_WORD, COMMAND_WORDS } from "./voicePhrase";
 
 // The parser is the whole-utterance matcher extracted from useVoiceCommand's
 // handleWord. Vosk returns the FULL utterance after silence (e.g. "sync
@@ -71,4 +71,35 @@ test("case and extra whitespace are normalised", () => {
 test("exports stay in lockstep with the grammar constants", () => {
   assert.equal(WAKE_WORD, "sync");
   assert.ok(COMMAND_WORDS.some((c) => c.kind === "pitstop" && c.words.includes("pit stop")));
+});
+
+// Item 5 (founder 2026-09-16, "automatic triggering of SOS"): a command fires
+// only when the wake word rode in the SAME utterance (or the picker is open in
+// bare mode). A bare command whose wake word was heard as the PREVIOUS
+// utterance parses to { kind, needsWake } with bare mode off — and must NOT
+// fire, so a stray "sync" one breath earlier can never complete into an SOS.
+test("shouldFireBareCommand: wake word + command in one breath fires", () => {
+  const parsed = parseVoiceUtterance("sync sos");
+  assert.deepEqual(parsed, { kind: "sos" });
+  assert.equal(shouldFireBareCommand(parsed, false), true);
+});
+
+test("shouldFireBareCommand: bare command with the picker open fires", () => {
+  const parsed = parseVoiceUtterance("sos", { bareCommandsEnabled: true });
+  assert.deepEqual(parsed, { kind: "sos" });
+  assert.equal(shouldFireBareCommand(parsed, true), true);
+});
+
+test("shouldFireBareCommand: bare command, wake word heard earlier, does NOT fire", () => {
+  // parseVoiceUtterance with bare mode off = the "wake word was a previous
+  // utterance" case the grace window used to (wrongly) complete.
+  const parsed = parseVoiceUtterance("sos", { bareCommandsEnabled: false });
+  assert.deepEqual(parsed, { kind: "sos", needsWake: true });
+  assert.equal(shouldFireBareCommand(parsed, false), false);
+});
+
+test("shouldFireBareCommand: bare wake word (activate) and null never fire", () => {
+  assert.equal(shouldFireBareCommand(parseVoiceUtterance("sync"), false), false);
+  assert.equal(shouldFireBareCommand(null, false), false);
+  assert.equal(shouldFireBareCommand(parseVoiceUtterance("[unk]"), true), false);
 });

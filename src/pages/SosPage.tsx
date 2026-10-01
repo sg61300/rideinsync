@@ -14,6 +14,7 @@ import {
   startSosTracking,
   staySos,
   stopSosTracking,
+  useOwnSosAlert,
   useSosResponses,
   type Responder,
 } from "../lib/sos";
@@ -21,14 +22,13 @@ import { playSignalTone } from "../lib/earcon";
 import { track } from "../lib/analytics";
 import { vibrateForTier } from "../lib/haptics";
 import type { SignalTier } from "../lib/signals";
+import { initialSosPhase, shouldConsumeAutoFlag, shouldResumeSentPhase, type Phase } from "./sosPhase";
 
 // A responder arriving is reassuring, not an emergency, so it uses the High
 // "attention" tier (a descending two-note chime) rather than the Critical
 // siren the raiser already heard on send. One tier drives both the earcon and
 // the haptic pulse, per signals_haptics_plan.md §7e.
 const RESPONSE_TIER: SignalTier = "high";
-
-type Phase = "no-ride" | "confirm" | "countdown" | "sending" | "sent" | "cancelled" | "error";
 
 const headingStyle = {
   margin: "0 0 var(--space-sm)",
@@ -51,8 +51,14 @@ export function SosPage() {
   const auto = Boolean((location.state as { auto?: boolean } | null)?.auto);
   const { userId } = useSession();
   const { rideId, loading } = useActiveRide(userId, location.pathname);
+  // Item 6: the rider's own unresolved alert, if any — lets a reload / PWA
+  // relaunch land back on the sent screen instead of a dead confirm.
+  const ownAlert = useOwnSosAlert(rideId, userId);
 
-  const [phase, setPhase] = useState<Phase>(auto ? "countdown" : "confirm");
+  // Captured once from the initial history entry: the countdown is armed only
+  // on the mount that carried { auto: true }. The auto flag is consumed below
+  // so a later Back/reload onto this same /sos entry sees auto === false.
+  const [phase, setPhase] = useState<Phase>(() => initialSosPhase(auto));
   const [count, setCount] = useState(COUNTDOWN_FROM);
   const [alertId, setAlertId] = useState<string | null>(null);
   const [hasLocation, setHasLocation] = useState(true);
@@ -60,6 +66,9 @@ export function SosPage() {
   const [stayedIds, setStayedIds] = useState<Set<string>>(new Set());
   // Inline "Cancel your SOS request?" confirm, shown over the sent screen.
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // RC-B: surfaced when the cancel RPC fails (e.g. cancel_sos_alert missing on
+  // the hosted DB) so "Yes, cancel" is never a dead tap. Cleared on retry.
+  const [cancelError, setCancelError] = useState<string | null>(null);
   // After 1.5 s in the "sending" phase, offer "Send now without location" so a
   // rider with GPS off is never stuck waiting on the location read.
   const [showSendNow, setShowSendNow] = useState(false);
@@ -113,13 +122,32 @@ export function SosPage() {
     }
   }, [phase, loading, rideId]);
 
-  // Once the countdown ends, clear the auto flag (same-path replace keeps phase
-  // state) so a later cancel word no longer navigates home from the sent screen.
+  // RC-A: consume the auto flag once, on the mount that carried it. `phase` was
+  // already initialised from this same flag, and a same-path replace keeps
+  // that phase state — but it rewrites this /sos history entry to
+  // { auto: false }, so a Back gesture, browser Back or PWA reload landing on
+  // the entry remounts in "confirm" instead of silently re-arming a countdown.
   useEffect(() => {
-    if (phase !== "countdown" && auto) {
-      navigate(location.pathname, { replace: true, state: { auto: false } });
-    }
-  }, [phase, auto, navigate, location.pathname]);
+    if (!shouldConsumeAutoFlag(location.state as { auto?: boolean } | null)) return;
+    console.info("[sos] auto flag consumed");
+    navigate(location.pathname, { replace: true, state: { auto: false } });
+    // Mount-once: intentionally not re-run when location changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Item 6: resume the sent screen for an SOS still unresolved on the backend
+  // after a reload / PWA relaunch. Only from an idle screen (confirm/no-ride);
+  // never mid-countdown or once already sent/cancelled. hasLocation stays true
+  // (the alert row does not carry it) — the "location sent" copy is correct for
+  // a resumed active alert. Restores alertId so Cancel SOS works and the
+  // tracking effect below restarts.
+  useEffect(() => {
+    if (!ownAlert) return;
+    if (!shouldResumeSentPhase(phase, true)) return;
+    console.info("[sos] resumed active alert", ownAlert.id);
+    setAlertId(ownAlert.id);
+    setPhase("sent");
+  }, [ownAlert, phase]);
 
   // Location tracking runs only while the SOS is active; cleared on unmount.
   useEffect(() => {
@@ -183,6 +211,7 @@ export function SosPage() {
 
   async function onConfirmCancel() {
     setConfirmCancel(false);
+    setCancelError(null); // clear any prior failure as this retry starts
     if (!alertId || !rideId || !userId) {
       // Nothing to cancel server-side; just leave the SOS screen.
       setPhase("cancelled");
@@ -192,8 +221,10 @@ export function SosPage() {
       await cancelSosAlert(alertId, rideId, userId);
       setPhase("cancelled");
     } catch {
-      // RPC failed → the SOS is NOT cancelled. Stay on the sent screen so the
-      // rider can retry; the failure is logged in cancelSosAlert.
+      // RPC failed → the SOS is NOT cancelled. Stay on the sent screen and
+      // surface the failure so "Yes, cancel" is not a dead tap; the rider can
+      // retry. The error itself is logged in cancelSosAlert.
+      setCancelError("Couldn't cancel the SOS. Check your connection and try again.");
     }
   }
 
@@ -213,7 +244,7 @@ export function SosPage() {
     return (
       <Card>
         <h1 style={headingStyle}>Sending SOS in {count}</h1>
-        <p style={bodyStyle}>Say 'cancel' or tap Cancel to stop.</p>
+        <p style={bodyStyle}>Tap Cancel to stop.</p>
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-sm)" }}>
           <Button variant="danger" onClick={() => void onConfirm()}>
             Send now
@@ -321,6 +352,11 @@ export function SosPage() {
               Back to home
             </Button>
           </div>
+        )}
+        {cancelError && (
+          <p role="alert" style={{ ...bodyStyle, margin: "var(--space-md) 0 0" }}>
+            {cancelError}
+          </p>
         )}
       </Card>
     );

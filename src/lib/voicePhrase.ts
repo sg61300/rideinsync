@@ -98,3 +98,28 @@ export function parseVoiceUtterance(text: string, { bareCommandsEnabled }: Optio
   if (kind) return bareCommandsEnabled ? { kind } : { kind, needsWake: true };
   return null;
 }
+
+/**
+ * Whether a parsed utterance should fire its command immediately.
+ *
+ * Founder ruling (2026-09-16, "automatic triggering of SOS"): a command fires
+ * ONLY when the utterance itself carried the authority to fire it — the wake
+ * word + command spoken together in one breath ({ kind }), or a bare command
+ * while the picker is open (bare mode, also { kind }). A command heard with no
+ * wake word in the same utterance ({ kind, needsWake: true }) NEVER fires: a
+ * wake word heard as a PREVIOUS utterance must not complete into a command,
+ * because that cross-utterance completion is what auto-triggered SOS.
+ *
+ * parseVoiceUtterance already collapses the bare-mode-on case to a plain
+ * { kind } (no needsWake), so a needsWake result only ever occurs with bare
+ * mode off — hence needsWake maps to `bareCommandsEnabled`, which is false
+ * there. Pure: no timers, no side effects.
+ */
+export function shouldFireBareCommand(
+  parsed: ParsedUtterance,
+  bareCommandsEnabled: boolean,
+): boolean {
+  if (!parsed || !("kind" in parsed)) return false;
+  if ("needsWake" in parsed) return bareCommandsEnabled;
+  return true;
+}

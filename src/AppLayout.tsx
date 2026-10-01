@@ -206,10 +206,26 @@ export function AppLayout() {
     });
   }
 
+  // Role-correct deep-link path for the viewer's active ride: ops crew
+  // (leader/co-leader/sweep) must land on /ride/:id/lead (the member view fails
+  // for them), everyone else on /ride/:id. Shared by the bell deep-link effect
+  // and the bare wake-word activate below so the role rule lives in one place.
+  const myRole = useMyRideRole(inApp ? rideId : null, userId);
+  const ridePath = rideId
+    ? (OPS_ROLES as readonly string[]).includes(myRole ?? "")
+      ? `/ride/${rideId}/lead`
+      : `/ride/${rideId}`
+    : null;
+
   function handleVoiceActivate() {
     publishVoiceHeard();
     publishVoiceActivate();
-    navigate("/ride/demo");
+    // A bare wake word ("sync") opens the viewer's own active ride, never the
+    // ungated /ride/demo (which on production seeds a real demo ride + sim
+    // riders). Falls back to the rides list when there is no active ride.
+    const to = ridePath ?? "/rides";
+    console.info(`[voice] activate → ${to}`);
+    navigate(to);
     showVoiceFeedback("Sync activated");
   }
 
@@ -237,15 +253,9 @@ export function AppLayout() {
   // it is null, so we publish the plain path first and upgrade to /lead once it
   // arrives — an ops rider might briefly deep-link to the member view, but never
   // the reverse (which is the failure mode), and the role settles in one fetch.
-  const myRole = useMyRideRole(inApp ? rideId : null, userId);
   useEffect(() => {
-    const ridePath = rideId
-      ? (OPS_ROLES as readonly string[]).includes(myRole ?? "")
-        ? `/ride/${rideId}/lead`
-        : `/ride/${rideId}`
-      : null;
     publishBellRidePath(inApp ? ridePath : null);
-  }, [inApp, rideId, myRole]);
+  }, [inApp, ridePath]);
 
   const voice = useVoiceCommand({
     enabled: inApp && Boolean(rideId) && voiceOn,
