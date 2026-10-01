@@ -41,7 +41,12 @@ function describeWatchError(err: unknown): string {
 }
 
 export function useGeolocation(active: boolean) {
+  // `fix` is throttled (5s/20m) and drives the DB send pipeline. `liveFix` is
+  // the raw native-rate fix for *rendering only* — the rider's own marker /
+  // nav camera follow it so the arrow moves smoothly instead of jumping every
+  // 5s, without adding any DB write load.
   const [fix, setFix] = useState<Fix | null>(null);
+  const [liveFix, setLiveFix] = useState<Fix | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Bumped by retry() to tear down the current watch and start a fresh one —
   // a denied/timed-out watch never recovers on its own.
@@ -140,6 +145,8 @@ export function useGeolocation(active: boolean) {
                 speed: num(pos.coords.speed),
                 accuracy: num(pos.coords.accuracy),
               };
+              // Every raw fix feeds the live render path (own marker/camera).
+              setLiveFix(next);
               const now = Date.now();
               const last = lastAccepted.current;
               const accepted =
@@ -178,5 +185,5 @@ export function useGeolocation(active: boolean) {
     setAttempt((n) => n + 1);
   }, []);
 
-  return { fix, error, retry };
+  return { fix, liveFix, error, retry };
 }
