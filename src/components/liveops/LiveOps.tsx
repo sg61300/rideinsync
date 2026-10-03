@@ -392,7 +392,7 @@ function LiveOpsInner({ ride }: { ride: Ride }) {
 
   // Push the current user's own GPS so their heading arrow (lead=red / you=green)
   // appears and moves on the map. Foreground only; stops once the ride ends.
-  const { fix, error: geoError, retry: retryGps } = useGeolocation(!ended && !!user);
+  const { fix, liveFix, error: geoError, retry: retryGps } = useGeolocation(!ended && !!user);
 
   const firstFixLoggedRef = useRef(false);
   useEffect(() => {
@@ -648,12 +648,16 @@ function LiveOpsInner({ ride }: { ride: Ride }) {
   // still resolving, weak signal, or a momentary gap). Heading likewise: live
   // when we have it, otherwise your last broadcast heading.
   const selfRider = riders.find((r) => r.member.user_id === user?.id) ?? null;
-  const selfPos: LatLng | null = fix
-    ? { lat: fix.lat, lng: fix.lng }
-    : selfRider?.latest
-      ? { lat: selfRider.latest.lat, lng: selfRider.latest.lng }
-      : null;
-  const selfHeading = fix ? navHeading : selfRider?.latest?.heading ?? navHeading;
+  // Prefer the raw native-rate liveFix for rendering (smooth ~1Hz movement),
+  // then the gated fix, then the last known DB position.
+  const selfPos: LatLng | null = liveFix
+    ? { lat: liveFix.lat, lng: liveFix.lng }
+    : fix
+      ? { lat: fix.lat, lng: fix.lng }
+      : selfRider?.latest
+        ? { lat: selfRider.latest.lat, lng: selfRider.latest.lng }
+        : null;
+  const selfHeading = fix || liveFix ? navHeading : selfRider?.latest?.heading ?? navHeading;
 
   // Maximizing the map = ride/nav mode (heading-up follow); minimizing = overview.
   function toggleFullscreen() {
@@ -774,7 +778,7 @@ function LiveOpsInner({ ride }: { ride: Ride }) {
           )}
           {!(navMode && fix) && !selectedPos && fitPath.length > 1 && <FitToRoute path={fitPath} />}
           {navMode && fix && (
-            <FollowCamera target={{ lat: fix.lat, lng: fix.lng }} zoom={navZoom} heading={navHeading} tilt={45} />
+            <FollowCamera target={{ lat: (liveFix ?? fix).lat, lng: (liveFix ?? fix).lng }} zoom={navZoom} heading={navHeading} tilt={45} />
           )}
           {!navMode && selectedPos && <PanToRider target={selectedPos} nonce={focusNonce} zoom={17} />}
           {stopPoints.map((p, i) => (
@@ -790,19 +794,21 @@ function LiveOpsInner({ ride }: { ride: Ride }) {
             const pos = { lat: r.latest.lat, lng: r.latest.lng };
             const selected = r.member.user_id === selectedRiderId;
             return (
-              <AdvancedMarker key={r.member.user_id} position={pos} zIndex={selected ? 1000 : undefined}>
+              // Tween over ~5s (their broadcast cadence) so packmates glide.
+              <AnimatedMarker key={r.member.user_id} position={pos} durationMs={5000} zIndex={selected ? 1000 : undefined}>
                 {isLead ? (
                   <ArrowPin color="#FF453A" heading={(r.latest.heading ?? 0) - mapHeading} name={r.profile.display_name} kind="Lead" selected={selected} />
                 ) : (
                   <RiderPin rider={r} selected={selected} />
                 )}
-              </AdvancedMarker>
+              </AnimatedMarker>
             );
           })}
           {/* Your own arrow: live GPS when available, else your last known
-              position, so you always see yourself (not just the lead). */}
+              position, so you always see yourself (not just the lead).
+              Tween over ~1.2s so it glides with the ~1Hz liveFix. */}
           {selfPos && (
-            <AdvancedMarker position={selfPos} zIndex={selectedIsSelf ? 1000 : undefined}>
+            <AnimatedMarker position={selfPos} durationMs={1200} zIndex={selectedIsSelf ? 1000 : undefined}>
               <ArrowPin
                 color={isLeader ? "#FF453A" : "#34C759"}
                 heading={selfHeading - mapHeading}
@@ -810,7 +816,7 @@ function LiveOpsInner({ ride }: { ride: Ride }) {
                 kind={isLeader ? "Lead" : "You"}
                 selected={selectedIsSelf}
               />
-            </AdvancedMarker>
+            </AnimatedMarker>
           )}
         </Map>
 
@@ -1271,6 +1277,65 @@ function FollowCamera({
     map.moveCamera({ center: target, zoom, heading, tilt });
   }, [map, target.lat, target.lng, zoom, heading, tilt]);
   return null;
+}
+
+// A marker that glides to each new position instead of teleporting. Tweens via
+// requestAnimationFrame over `durationMs` (own rider ~1.2s to match the ~1Hz
+// liveFix; packmates ~5s to match their broadcast cadence). Each instance owns
+// its own tween, so only that marker re-renders, never the whole map. Snaps on
+// tiny moves, big jumps (teleport/first fix), and prefers-reduced-motion.
+function AnimatedMarker({
+  position,
+  durationMs = 1000,
+  zIndex,
+  children,
+}: {
+  position: LatLng;
+  durationMs?: number;
+  zIndex?: number;
+  children: ReactNode;
+}) {
+  const [pos, setPos] = useState<LatLng>(position);
+  const posRef = useRef<LatLng>(position);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const moved = haversineMeters(posRef.current, position);
+    if (reduce || moved < 0.5 || moved > 500) {
+      posRef.current = position;
+      setPos(position);
+      return;
+    }
+    const from = posRef.current;
+    const target = position;
+    const start = performance.now();
+    let lastFrame = 0;
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    const step = (t: number) => {
+      const k = Math.min(1, (t - start) / durationMs);
+      if (t - lastFrame >= 32 || k >= 1) {
+        // ~30fps cap keeps re-renders cheap across many markers.
+        lastFrame = t;
+        const p = { lat: from.lat + (target.lat - from.lat) * k, lng: from.lng + (target.lng - from.lng) * k };
+        posRef.current = p;
+        setPos(p);
+      }
+      if (k < 1) rafRef.current = requestAnimationFrame(step);
+    };
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [position.lat, position.lng, durationMs]);
+
+  return (
+    <AdvancedMarker position={pos} zIndex={zIndex}>
+      {children}
+    </AdvancedMarker>
+  );
 }
 
 // Pan + zoom to a focused rider. Keyed on `nonce` (bumped each time the user
